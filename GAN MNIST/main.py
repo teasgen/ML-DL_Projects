@@ -1,5 +1,6 @@
 import torch
 import torchvision
+from torch.utils.mobile_optimizer import optimize_for_mobile
 from torchvision import datasets
 from torchvision import transforms
 from torch.utils.tensorboard import SummaryWriter
@@ -78,6 +79,7 @@ def weights_init(model):
 
 
 class GlobalGeneratorDiscriminator(nn.Module):
+
     def __init__(self, gen, disc):
         super().__init__()
         self.G = gen
@@ -140,8 +142,25 @@ class GlobalGeneratorDiscriminator(nn.Module):
                         writer_fake.add_image("Fake", img_grid_fake, global_step=step)
 
                     step += 1
+
                 lossesD.append(D_loss)
                 lossesG.append(G_loss)
+
+
+def optimizeSave(sample):
+    model = Generator()
+    # Load in the model
+    model.load_state_dict(torch.load("model.pt", map_location=torch.device("cpu")))
+    model.eval()  # Put the model in inference mode
+
+    # Generate the optimized model
+    traced_script_module = torch.jit.trace(model, sample)
+    traced_script_module_optimized = optimize_for_mobile(
+        traced_script_module)
+
+    # Save the optimzied model
+    traced_script_module_optimized._save_for_lite_interpreter(
+        "model_gan_opt.pt")
 
 
 img_size = 64
@@ -159,24 +178,29 @@ transforms = transforms.Compose(
 dataset = datasets.MNIST(
     root="dataset/", train=True, transform=transforms, download=True
 )
-
 batch_size = 128
 noise_size = 100
 device = torch.device('cuda')
-train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
+train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 batch = next(iter(train_loader))
 batch_data, batch_labels = batch[0].to(device), batch[1].to(device)
+
 noise = torch.rand((batch_size, noise_size, 1, 1)).to(device)
-
-G = Generator(feature_sz=64).to(device)
+G = Generator(feature_sz=32).to(device)
 weights_init(G)
+
 assert G(noise).shape == (batch_size, 1, img_size, img_size), "G shape out failed"
-
-D = Discriminator(feature_sz=64).to(device)
+D = Discriminator(feature_sz=32).to(device)
 weights_init(D)
+
 assert D(batch_data).shape == (batch_size, 1, 1, 1), "D shape out failed"
-
-
 model = GlobalGeneratorDiscriminator(G, D).to(device)
-model.model_train(dataloader=train_loader, batch_sz=batch_size, noise_sz=noise_size, epochs=5)
+
+model.model_train(train_loader, batch_sz=batch_size, noise_sz=noise_size)
+
+model = model.to('cpu')
+noise = noise.to('cpu')
+torch.save(model.G.state_dict(), "model.pt")
+
+optimizeSave(noise)
