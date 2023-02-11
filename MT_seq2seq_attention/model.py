@@ -147,7 +147,7 @@ class Seq2Seq(nn.Module):
 
         self.encoder = encoder
         self.decoder = decoder
-        self.out = nn.Linear(decoder.hid_dim, decoder.n_tokens)
+        self.out = nn.Linear(decoder.hid_dim * 2, decoder.n_tokens)
 
         assert encoder.hid_dim == decoder.hid_dim, "encoder and decoder must have same hidden dim"
         assert (
@@ -168,7 +168,8 @@ class Seq2Seq(nn.Module):
             attention_score = (out_enc @ out_dec)
             proba = nn.Softmax(dim=1)(attention_score)
             attention_output = torch.sum(out_enc * proba, dim=1)
-            attention_output += out_dec.squeeze()
+            # attention_output += out_dec.squeeze() # just sum - BLEU <= 25
+            attention_output = torch.cat((attention_output, out_dec.squeeze()), 1)  # concat - BLEU <= 28
             pred = self.out(attention_output)
             preds.append(pred)
 
@@ -180,27 +181,10 @@ class Seq2Seq(nn.Module):
 
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-enc = Encoder(len(src_vocab), emb_dim=256, hid_dim=512, n_layers=2, dropout=0.5)
-dec = Decoder(len(trg_vocab), emb_dim=256, hid_dim=512, n_layers=2, dropout=0.5)
+hid_dim = 512
+enc = Encoder(len(src_vocab), emb_dim=256, hid_dim=hid_dim, n_layers=2, dropout=0.5)
+dec = Decoder(len(trg_vocab), emb_dim=256, hid_dim=hid_dim, n_layers=2, dropout=0.5)
 model = Seq2Seq(enc, dec).to(device)
-
-enc.eval(), dec.eval()
-
-# NEED BATCH FIRST
-
-states, hidden = enc(src_batch.to(device=device))
-dec_out, _ = dec(trg_batch[0, :].to(device=device), hidden)
-states = torch.permute(states, (1, 0, 2))
-dec_out = torch.permute(dec_out, (1, 2, 0))
-ans = states @ dec_out
-proba = nn.Softmax(dim=1)(ans)
-score = torch.sum(states * proba, dim=1)
-score += dec_out.squeeze()
-
-print(score.shape, states.shape, proba.shape, dec_out.shape)
-# (score[0, :][0]).item(), (torch.sum(states[0, :, 0] * proba[0, :, 0]) + dec_out[0, 0, 0]).item()
-
-enc.train(), dec.train()
 
 
 def init_weights(m):
@@ -215,16 +199,16 @@ def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-print(f"The model has {count_parameters(model):,} trainable parameters")  # ~16.2 millions
+print(f"The model has {count_parameters(model):,} trainable parameters")  # > 21.0 millions
 
-optimizer = torch.optim.Adam(model.parameters())
+lr = 3e-3
+optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 criterion = nn.CrossEntropyLoss(ignore_index=trg_vocab[pad_token])
 loss_history, train_loss_history, val_loss_history = [], [], []
 
 len(train_dataloader)
 
 import matplotlib.pyplot as plt
-from IPython.display import clear_output
 from torch.nn.utils import clip_grad_norm_
 
 # model = torch.load("seq2seq_attention_en_ru.pt")
@@ -233,6 +217,9 @@ n_epochs = 25
 clip = 1
 src, trg, loss, output, train_loss = None, None, None, None, None
 for epoch in range(n_epochs):
+    if (epoch + 1) % 5 == 0:
+        lr /= 3
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     model.train()
     train_loss = 0
     for src, trg in train_dataloader:
@@ -285,7 +272,7 @@ for epoch in range(n_epochs):
             val_loss += loss.detach().item()
 
     val_loss /= len(val_dataloader)
-    if epoch >= 10 and val_loss < val_loss_history[-1]:
+    if epoch >= 5 and val_loss < val_loss_history[-1]:
         torch.save(model, "seq2seq_attention_en_ru.pt")
     if epoch >= 10 and val_loss >= val_loss_history[-1] and val_loss >= val_loss_history[-2]:
         break
@@ -311,7 +298,8 @@ with torch.no_grad():
             attention_score = (out_enc @ out_dec)
             proba = nn.Softmax(dim=1)(attention_score)
             attention_output = torch.sum(out_enc * proba, dim=1)
-            attention_output += out_dec.squeeze()
+            # attention_output += out_dec.squeeze()
+            attention_output = torch.cat((attention_output, out_dec.squeeze()), 1)
             pred = model.out(attention_output)
 
             _, pred_token = pred.max(dim=1)
@@ -356,4 +344,4 @@ with torch.no_grad():
 bleu = corpus_bleu([[ref] for ref in references], hypotheses)
 print(f"model shows test BLEU of {100 * bleu:.1f}")
 
-# model shows test BLEU of 25.2
+# model shows test BLEU of 28.5
